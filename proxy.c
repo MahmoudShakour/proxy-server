@@ -12,10 +12,111 @@ void doit(int fd);
 void read_requesthdrs(rio_t *rp, char *method, char *filename, char *version, char *uri, char *headers);
 void parse_uri(char *uri, char *filename, char *port);
 
+typedef struct cache_item
+{
+    volatile int length;
+    char filename[MAXLINE];
+    char uri[MAXLINE];
+    char content[MAX_OBJECT_SIZE];
+} cache_item;
+
+cache_item *cache[MAX_CACHE_SIZE];
+
+sem_t mutex, w;
+volatile int readcnt, clk;
+
+int is_object_cached(cache_item *cached_item, char *uri, char *filename)
+{
+
+    P(&mutex);
+    readcnt++;
+    if (readcnt == 1)
+        P(&w);
+    V(&mutex);
+
+    int is_cached = 0;
+    for (int i = 0; i < MAX_CACHE_SIZE; i++)
+    {
+
+        if (cache[i] == NULL)
+            continue;
+
+        printf("from cache: %d\n", i);
+
+        if ((!strcmp(uri, cache[i]->uri)) && (!strcmp(filename, cache[i]->filename)))
+        {
+            strcpy(cached_item->content,cache[i]->content);
+            strcpy(cached_item->filename,cache[i]->filename);
+            strcpy(cached_item->uri,cache[i]->uri);
+            cached_item->length = cache[i]->length;
+            printf("qqq\n");
+            if(cached_item==NULL){
+                printf("howwwwwwwwwwwwwwqqq\n");
+            }
+            is_cached = 1;
+            break;
+        }
+    }
+    printf("qqq\n");
+
+    P(&mutex);
+    readcnt--;
+    if (readcnt == 0)
+        V(&w);
+    V(&mutex);
+
+    printf("iscached: (%d)\n", is_cached);
+    return is_cached;
+}
+
+void cache_object(char *content, int total_size, char *filename, char *uri)
+{
+    P(&w);
+
+    if (total_size > MAX_OBJECT_SIZE)
+        return;
+
+    for (int i = 0; i < MAX_CACHE_SIZE; i++)
+    {
+        if (cache[i] == NULL)
+        {
+            cache[i] = (cache_item *)Malloc(sizeof(cache_item));
+            strcpy(cache[i]->content, content);
+            strcpy(cache[i]->filename, filename);
+            strcpy(cache[i]->uri, uri);
+            cache[i]->length = total_size;
+            printf("cachelength: (%d)", cache[i]->length);
+            V(&w);
+            return;
+        }
+    }
+
+    // int mn = MAX_CACHE_SIZE;
+    // cache_item *LRU_item;
+    // for (int i = 0; i < MAX_CACHE_SIZE; i++)
+    // {
+    //     cache_item *item = cache[i];
+    //     if (item->last_access < mn)
+    //     {
+    //         mn = item->last_access;
+    //         LRU_item = item;
+    //     }
+    // }
+
+    // strcpy(LRU_item->content, content);
+    // strcpy(LRU_item->filename, filename);
+    // strcpy(LRU_item->uri, uri);
+    // LRU_item->length = total_size;
+    // LRU_item->last_access = clk++;
+
+    V(&w);
+}
+
 int main(int argc, char **argv)
 {
+    Sem_init(&w, 0, 1);
+    Sem_init(&mutex, 0, 1);
     int listenfd, *connfd;
-    // char hostname[MAXLINE], port[MAXLINE];
     socklen_t clinetlen;
     struct sockaddr_storage clientaddr;
     pthread_t tid;
@@ -43,7 +144,6 @@ int main(int argc, char **argv)
 void *thread(void *data)
 {
     int fd = *((int *)data);
-    printf("%d\n\n\n",fd);
     pthread_detach(pthread_self());
     Free(data);
     doit(fd);
@@ -55,6 +155,9 @@ void doit(int fd)
 {
     char headers[MAXLINE], buf[MAXLINE], method[MAXLINE];
     char filename[MAXLINE], port[MAXLINE], uri[MAXLINE], version[MAXLINE];
+    char content[MAX_OBJECT_SIZE];
+    strcpy(content, "");
+    cache_item *cached_item=(cache_item *)Malloc(sizeof(cache_item));
     rio_t rio, tiny_rio;
 
     /* Read request line and headers */
@@ -74,19 +177,39 @@ void doit(int fd)
     read_requesthdrs(&rio, method, filename, version, uri, headers);
 
     strcpy(uri, "localhost"); // +7
+
+    printf("(%s) (%s)\n", uri, filename);
+    if (is_object_cached(cached_item, uri, filename))
+    {
+        Rio_writen(fd, cached_item->content, cached_item->length);
+        return;
+    }
     int tinyfd = Open_clientfd(uri, port);
     Rio_readinitb(&tiny_rio, tinyfd);
 
     Rio_writen(tinyfd, headers, strlen(headers));
-    int n;
+    int n, total_size = 0;
     while ((n = Rio_readlineb(&tiny_rio, buf, MAXLINE)) > 0)
     {
         printf("%s", buf);
         Rio_writen(fd, buf, n);
-    }
-}
-// GET http://localhost:20000/home.html HTTP/1.0
+        total_size += n;
 
+        if (total_size <= MAX_OBJECT_SIZE)
+        {
+            strcat(content, buf);
+        }
+    }
+    cache_object(content, total_size, filename, uri);
+}
+// GET http://localhost:20000/tiny.c HTTP/1.0
+// GET http://localhost:20000/home.html HTTP/1.0
+// GET http://localhost:20000/csapp.c HTTP/1.0
+
+
+// Fetching ./tiny/tiny.c into ./.proxy using the proxy
+// Fetching ./tiny/home.html into ./.proxy using the proxy
+// Fetching ./tiny/csapp.c into ./.proxy using the proxy
 void read_requesthdrs(rio_t *rp, char *method, char *filename, char *version, char *uri, char *headers)
 {
     sprintf(headers, "%s %s %s\r\n", method, filename, version);
